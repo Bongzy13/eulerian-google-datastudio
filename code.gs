@@ -1,8 +1,6 @@
 var cc = DataStudioApp.createCommunityConnector();
 
 var DEFAULT = {
-  "TIMEZONE": { 'ca': 'America/Montreal', 'com': 'Europe/Paris' },
-  "TZ_OFFSET": "02",
   "QUERY": {
     "async": false,
     "reports": [
@@ -35,10 +33,11 @@ function isAdminUser() {
 }
 
 function getAuthType() {
-  return {
-    type: 'NONE'
-  };
+  return cc.newAuthTypeResponse()
+    .setAuthType(cc.AuthType.NONE)
+    .build();
 }
+
 
 function getConfig(request) {
   var config = cc.getConfig();
@@ -155,9 +154,7 @@ function getConfig(request) {
 
   config.newInfo()
     .setId('query_instructions')
-    .setText(
-      'Enter the query to access data. An invalid or blank entry will revert to the default query. Read our documentation to discover how to build your query https://doc.api.eulerian.com/#tag/Batch-Reporting'
-    );
+    .setText('Enter the query to access data. An invalid or blank entry will revert to the default query. Read our documentation to discover how to build your query https://doc.api.eulerian.com/#tag/Batch-Reporting');
 
 
   config.newTextArea()
@@ -172,27 +169,35 @@ function getConfig(request) {
       `e.g. {
     "async": false,
     "reports": [
-        {
-            "kind": "rt#insummary",
-            "path": "{{path}}",
-            "dimensions": [
-                {"name": "media_key", "field": "media_key"},
-                {"name": "publisher", "field": "publisher_name"},
-                {"name": "ope", "field": "ope_name"}
-            ],
-            "dateRanges": [
-                {"range": "YESTERDAY"}
-            ],
-            "metrics": [
-                {"name": "clics", "field": "click"},
-                {"name": "page views", "field": "hit"},
-                {"name": "scartvalid", "field": "scartvalid", "segment": {"by": "ordertype"}}
-            ]
-        }
+      {
+        "kind": "rt#insummary",
+        "path": "mcWEBSITE[?].mcGLOBALOPE.mcOPE",
+        "dateRanges": [{ "range": "YESTERDAY" }],
+        "dimensions": [
+          { "field": "ope_name", "name": "ope" },
+          { "field": "media_key", "name": "Media Key" },
+          { "field": "publisher_name", "name": "Publisher Name" },
+          { "field": "mediaplan_name", "name": "Mediaplan Name" },
+          { "field": "submedia_name", "name": "Submedia Name" }
+        ],
+        "metrics": [
+          { "field": "hit", "name": "page views" },
+          { "field": "click", "name": "click" },
+          { "field": "estimatevalid", "name": "leads", "segment": { "by": "estimatetype" } },
+          { "field": "scartvalid", "name": "scartvalid", "segment": { "by": "ordertype" } }
+        ]
+      }
     ]
-}
+  }
 `
     );
+
+  config
+    .newCheckbox()
+    .setId('includeGlobal')
+    .setName('Includes GLOBAL rows')
+    .setHelpText('Check this box to include rows with channel GLOBAL in your dataset. Recommended: should be enabled only in specific cases because it might alter your metrics')
+    .setAllowOverride(true);
 
   config
     .newSelectMultiple()
@@ -269,18 +274,35 @@ function getFields(request, content = {}) {
   const FIELDS = { 'text': types.TEXT, 'int': types.NUMBER, 'float': types.NUMBER, 'time': types.NUMBER, 'pct': types.PERCENT };
 
   console.log("getFields::@request", request);
+  // console.log("getFields::@content", content);
 
-  request.configParams = validateConfig(request, true);
-  content = fetchDataFromApi(request);
+  if (Object.keys(content).length === 0) {
+    console.log("getFields():: api response does not exist.");
 
+    request.configParams = validateConfig(request, true);
 
-  content = content.data.request.reports[0];
+    if (request.configParams.error) {
+      cc.newUserError()
+        .setText("The field query.json used in the configuration of your data source contains errors. Please check and try again.")
+        .setDebugText("The field query.json used in the configuration of your data source contains errors. Please check and try again.")
+        .throwException();
+    }
+    content = fetchDataFromApi(request);
+    content = content.data.request.reports[0];
+  }
+  else {
+
+    console.log("getFields():: api response already exists.");
+    content = content.data.reports[0].columnHeader;
+  }
+
+  console.log("getFields()::@content-2", JSON.stringify(content.metrics));
 
   var dimensions = content.dimensions || [];
   var dr_metrics = content.metrics || [];
 
-  console.log("@dimensions", dimensions);
-  console.log("@dr_metrics", JSON.stringify(dr_metrics));
+  console.log("getFields()::@dimensions", dimensions);
+  console.log("getFields()::@dr_metrics", dr_metrics);
 
   fields.newDimension()
     .setId("reported")
@@ -296,6 +318,7 @@ function getFields(request, content = {}) {
     .setType(types.TEXT);
 
   dimensions.forEach(function (dim) {
+
     fields.newDimension()
       .setId(dim.field)
       .setName(dim.name)
@@ -303,32 +326,43 @@ function getFields(request, content = {}) {
       .setType(types.TEXT);
   });
 
-  dr_metrics.forEach(function (dr_met) {
+  dr_metrics.forEach((dr_met) => {
+    var { field, segment, name, affinity } = dr_met;
 
-    if (dr_met.segment) {
-      if (dr_met.segment.values) {
-        dr_met.segment.values.forEach(metricSegment => {
+    if (/\-/.test(field)) { sendUserError('The connector received a field from API with unauthorized character "-" details:', field); }
+
+    if (segment) {
+      if (segment.values) {
+        segment.values.forEach(metricSegment => {
+
           fields.newMetric()
-            .setId(dr_met.segment.by + metricSegment.id)
-            .setName(`${dr_met.segment.by}_${metricSegment.name}`)
-            .setDescription(`${dr_met.field} - type: ${metricSegment.name}`)
+            .setId(field + metricSegment.id)
+            .setName(`${field}_${metricSegment.name}`)
+            .setDescription(`${field} - id: ${metricSegment.id} - type: ${metricSegment.name}`)
             .setType(FIELDS[dr_met.affinity]);
+
         });
       }
     }
     else {
       fields.newMetric()
-        .setId(dr_met.field)
-        .setName(dr_met.name)
-        .setDescription(dr_met.name)
-        .setType(FIELDS[dr_met.affinity]);
+        .setId(field)
+        .setName(name)
+        .setDescription(name)
+        .setType(FIELDS[affinity]);
     }
 
   });
 
   // fields.setDefaultDimension("media_key");
 
-  // console.log('getFields():: @fields.build()', fields.build());
+  console.log('getFields():: @fields.build()');
+  fields.build().forEach(
+    ({ name, dataType, label, semantics: { conceptType } }) => {
+      let msg = `${conceptType} (${dataType}) :: id: ${name} - name: ${label}`;
+      console.log(msg);
+    }
+  );
   console.log("getFields()::END");
 
   return fields;
@@ -347,13 +381,21 @@ function getSchema(request) {
 // [START get_data]
 function getData(request) {
   console.log("getData::STARTING");
+  console.log("getData():: @request", { request });
 
   request.configParams = validateConfig(request);
-  console.log("getData::@request-postvalidateConfig", JSON.stringify(request));
+  if (request.configParams.error) {
+    cc.newUserError()
+      .setText(message)
+      .setDebugText(message)
+      .throwException();
+  }
 
-  let timeZone = DEFAULT.TIMEZONE[request.configParams.apiDomain.split(".").pop()];
+  var includeGlobal = request.configParams.includeGlobal || false;
 
-  var cacheKey = getSHA256(request.configParams.query);
+  console.log("getData::@request-postvalidateConfig", request);
+
+  var cacheKey = getSHA256(request.configParams.query + request.configParams.apiSite);
   // console.log('getData():: @cacheKey',cacheKey);
 
   var apiResponse = getCachedData(cacheKey, request);
@@ -372,7 +414,7 @@ function getData(request) {
     var fields = getFields(request, apiResponse);
     var requestedFields = fields.forIds(request.fields.map((field) => field.name));
 
-    var normalizedResponse = normalizeResponse(apiResponse, timeZone);
+    var normalizedResponse = normalizeResponse(apiResponse, includeGlobal);
     var data = getFormattedData(normalizedResponse, requestedFields.asArray());
   } catch (e) {
     console.log(e);
@@ -396,10 +438,12 @@ function getData(request) {
  */
 function fetchDataFromApi(request) {
   console.log("fetchDataFromApi()::START");
+
   var configParams = request.configParams;
   var url = `${configParams.apiDomain}/ea/v2/ea/${configParams.apiSite}/report/batch/query.json`;
+
   console.log("fetchDataFromApi()::@url", url);
-  console.log("fetchDataFromApi()::@query", configParams.query);
+  console.info("fetchDataFromApi()::@query", configParams.query);
 
   var options = {
     method: 'post',
@@ -411,17 +455,28 @@ function fetchDataFromApi(request) {
   try {
     var response = UrlFetchApp.fetch(url, options);
   } catch (e) {
-    sendUserError('No servers found when trying to connect. Please check your credentials. Details: ' + e);
+    console.error(e);
+    sendUserError('No servers found when trying to connect. Please check your credentials. Details: url: ' + url + "##" + e);
   }
 
   try {
     response = JSON.parse(response);
   } catch (e) {
+    console.error(e);
     sendUserError('The connector has encountered an unrecoverable error. Error fetching data from API')
   }
 
+  if (response.error) {
+    var { error_code, error_msg } = response;
+    console.error(`${error_msg} (${error_code})`);
+    console.log(response);
+    sendUserError(`Error fetching data from API: ${error_msg} (${error_code})`);
+  }
 
-  console.log("fetchDataFromApi:: @response", response);
+
+
+  console.log("fetchDataFromApi:: @response received");
+  // console.log("fetchDataFromApi:: @response", response);
   console.log("fetchDataFromApi()::END");
   return response;
 }
@@ -435,113 +490,137 @@ function fetchDataFromApi(request) {
  * @return {Object} Contains package names as keys and associated download count
  *     information(object) as values.
  */
-function normalizeResponse(response, tz) {
+function normalizeResponse(response, includeGlobal = false) {
+  // pushSegment(segMetrics, segmentArray, segVal, i_seg);
+  function pushSegment(input, storage, segment_val = "all", index = 0) {
+    // console.log(segment_val, input, rowDims);
+    input.forEach(
+      (m) => {
+        storage[index] = m.values.map((val, c) => ({
+          ...storage[index][c],
+          ...rowDims,
+          reported: formatGoogleDate(_epochs[c]["epoch"], _tz),
+          [m.name]: val,
+          segment_val
+        }));
+      }
+    )
+  }
+
   console.log("normalizeResponse()::START");
-  // console.log("response", response.data.reports[0]);
-  var api_response = response.data.reports[0];
-  var _epochs = api_response.columnHeader.dateRanges[0].values; console.log("@epoch", _epochs);
-  var _dimensions = api_response.columnHeader.dimensions; // console.log("@dimensions", _dimensions);
-  var _metrics = api_response.columnHeader.metrics; // console.log("@metrics", _metrics);
-  var _data = api_response.data; // console.log("@data", JSON.stringify(_data));
-
-
-
-
-
+  var api_response = response.data.reports[0]; // console.log("response", api_response);
+  var { columnHeader } = api_response;
+  var _tz = columnHeader.dateRanges[0].tzone;
+  var _epochs = columnHeader.dateRanges[0].values; // console.log("@epoch", _epochs); 
+  var { metrics, dimensions } = columnHeader; // console.log("@metrics", metrics); console.log("@dimensions", dimensions);
+  var { data } = api_response || []; // console.log("@data", data);
+  var dataLength = data.length;
 
   var output = [];
+  var consoleCounter = { keys: {}, nbKeys: {} };
 
-  _data.forEach((row, i_epoch) => {
-    let row_dim = Object.fromEntries(_dimensions.map((_, index) => [_dimensions[index].field, row.dimensions[index] || ""]));
-    if (row_dim.media_key == "GLOBAL") { return; }
-    // console.log("row", row);
+  for (var a = 0; a < dataLength; a++) {
+    var row = data[a]; // console.log("row", row);
+
+    var rowDims = Object.fromEntries(dimensions.map((_, index) => [dimensions[index].field, row.dimensions[index] || ""])); // console.log("rowDims", rowDims);
+
+    //TODO: en attente de validation
+    if (!(includeGlobal) && rowDims.media_key == "GLOBAL") { continue; }
 
     var segmentArray = [[]];
 
-    row.metrics.forEach((sub, i_metric) => {
 
-      _metricName = _metrics[i_metric].field;
-      if ("segments" in sub && ["device", "view"].includes(Object.keys(sub.segments)[0])) {
-        let segType = Object.keys(sub.segments)[0];
-        let metric = sub.segments[segType];
 
-        metric.forEach((segment, i_seg) => {
+    var metricsLength = row.metrics.length;
 
-          segmentArray[i_seg] = segmentArray[i_seg] || [];
-          let segVal = `${segment.name}_${segment.id}`;
+    for (let i_metric = 0; i_metric < metricsLength; i_metric++) {
 
-          let values = segment.values;
+      var sub = row.metrics[i_metric]; // console.log("@sub",sub);
+      sub = (Array.isArray(sub) ? sub[0] : sub);
+      var metricName = metrics[i_metric].field;
+      let segMetrics = [{ name: metricName }];
 
-          if (typeof values[0] === 'object' && values[0] !== null && "segments" in values[0]) {
+      if ("segments" in sub) {
+        var segmentType = Object.keys(sub.segments)[0];
 
-            let segMetricName = Object.keys(values[0].segments)[0];
-            let segMetrics = values[0].segments[segMetricName].map((segMetric, index) => ({ "name": segMetricName + segMetric.id, "values": segMetric.values }));
+        if (["device", "view"].includes(segmentType)) {
+          let metric = sub.segments[segmentType];
 
-            segMetrics.forEach((segMetric, segMet_i) => {
-              segmentArray[i_seg] = segMetric.values.map((val, index) => ({
-                ...segmentArray[i_seg][index],
-                ...row_dim,
-                "reported": formatGoogleDate(_epochs[index]["epoch"], tz),
-                [segMetric.name]: val,
-                "segment_val": segVal
-              }));
-            });
+          for (let i_seg = 0; i_seg < metric.length; i_seg++) {
+            segMetrics = [];
+            segmentArray[i_seg] = segmentArray[i_seg] || [];
 
+            // e.g. id=2, name=`Phone`, values=[{segments:{estimatetype:[Object]}}]
+            var { id, name, values } = metric[i_seg];
+            segMetrics[0] = { values, name: metricName };
+            var segVal = `${name}_${id}`;
+
+            if (typeof values[0] === 'object' && values[0] !== null && "segments" in values[0]) {
+              var segmentTypelvl2 = Object.keys(values[0].segments)[0];
+              segMetrics = values[0].segments[segmentTypelvl2].map(
+                ({ id, values }) => ({
+                  name: `${metricName}${id}`,
+                  values
+                })
+              );
+
+            }
+            else if (typeof values[0] === 'object' && values[0] !== null && "values" in values[0]) {
+              segMetrics[0]["values"] = values[0].values;
+            }
+
+            pushSegment(segMetrics, segmentArray, segVal, i_seg);
+            // delete segMetrics[0].values;
           }
-          else {
-
-            if (typeof values[0] === 'object' && values[0] !== null && "values" in values[0]) { values = values[0].values }
-            segmentArray[i_seg] = values.map((val, index) => ({
-              ...segmentArray[i_seg][index],
-              ...row_dim,
-              "reported": formatGoogleDate(_epochs[index]["epoch"], tz),
-              [_metricName]: val,
-              "segment_val": segVal
-            }));
-          }
-
-        });
-      }
-      else {
-        var sub = (Array.isArray(sub) ? sub[0] : {});
-        if ("segments" in sub) {
-          let segMetricName = Object.keys(sub.segments)[0];
-          let segMetrics = sub.segments[segMetricName].map((segMetric, index) => ({ "name": segMetricName + segMetric.id, "values": segMetric.values }));
-
-          segMetrics.forEach((segMetric, segMet_i) => {
-            segmentArray[0] = segMetric.values.map((val, index) => ({
-              ...segmentArray[0][index],
-              ...row_dim,
-              "reported": formatGoogleDate(_epochs[index]["epoch"], tz),
-              [segMetric.name]: val,
-              "segment_val": "all"
-            }));
-          });
-
         }
         else {
-          values = sub.values;
-          if (typeof values[0] === 'object' && values[0] !== null && "values" in values[0]) { values = values[0].values }
+          segMetrics = sub.segments[segmentType];
+          segMetrics = segMetrics.map(({ id, values }) => ({ name: `${metricName}${id}`, values }));
 
-          segmentArray[0] = values.map((val, index) => ({
-            ...segmentArray[0][index],
-            ...row_dim,
-            "reported": formatGoogleDate(_epochs[index]["epoch"], tz),
-            [_metricName]: val,
-            "segment_val": "all"
-          }));
+          pushSegment(segMetrics, segmentArray);
         }
+
+
+      }
+      else {
+        var { values } = sub;
+        segMetrics[0]["values"] = values;
+        if (typeof values[0] === 'object' && values[0] !== null && "values" in values[0]) {
+          segMetrics[0]["values"] = values[0].values;
+        }
+        pushSegment(segMetrics, segmentArray);
       }
 
-    });
+    };
 
-    output = output.concat(segmentArray.flat());
-  });
-  console.log("normalizeResponse()::@output head 10 rows", JSON.stringify(output.slice(0, 10)));
+    segmentArray = segmentArray.flat();
+    // console.log("normalizeResponse()::@segmentArray", JSON.stringify(segmentArray));
+    output = output.concat(segmentArray);
+  }
+
+  console.log("normalizeResponse()::@output length: ", output.length);
+  for (var i = 0; i < output.length; i++) {
+    let countRow = Object.keys(output[i]);
+    consoleCounter.nbKeys[countRow.length] = consoleCounter.nbKeys[countRow.length] + 1 || 1;
+    countRow
+      .forEach(key => {
+        consoleCounter.keys[key] = (output[i][key] != 0 && output[i][key] != "" ?
+          (consoleCounter.keys[key] + 1 || 1) :
+          (consoleCounter.keys[key] || 0)
+        )
+      })
+  }
+  console.log("normalizeResponse()::@output details:", consoleCounter);
+    if (output.length > 15) {
+    console.log("normalizeResponse()::@output head 15 rows", JSON.stringify(output.slice(0, 15)));
+  }
+  else if (output.length <= 15 && output.length > 0) {
+    console.log("normalizeResponse()::@output", output);
+  }
+  
   console.log("normalizeResponse()::END");
   return output;
 }
-
 
 
 /**
@@ -557,7 +636,9 @@ function normalizeResponse(response, tz) {
 function getFormattedData(report_data, requestedFields) {
   console.log("getFormattedData()::START");
   var data = [];
-  report_data.forEach((i) => data.push(formatData(requestedFields, i)));
+  report_data.forEach(
+    (i) => data.push(formatData(requestedFields, i))
+  );
   console.log("getFormattedData():: @data", data);
   console.log("getFormattedData()::END");
   return data;
@@ -579,37 +660,51 @@ function validateConfig(r = {}, dryRun = false) {
     fields = fields.map(field => field.name);
     configParams = r.configParams || {};
 
-    console.log("validateConfig():: @configParams-query", configParams.query);
+    // console.log("validateConfig():: @configParams-query", configParams.query);
 
-    configParams.apiDomain = configParams.apiDomain;
+    configParams.apiDomain = "https://" + configParams.apiDomain.replace(/https?:\/\//, "");
     configParams.apiKey = configParams.apiKey;
     configParams.apiSite = configParams.apiSite;
     configParams.dateScale = configParams.dateScale || "auto";
-    configParams.query = { ...(isJson(configParams.query) ? JSON.parse(configParams.query) : DEFAULT.QUERY), dryRun, async: false };
+
+    if (typeof configParams.query === "undefined" || configParams.query == "") { configParams.query = DEFAULT.QUERY }
+
+    if ((isJson(configParams.query)) == false) {
+      configParams.error = true;
+      return configParams;
+    } else {
+      configParams.query = (typeof configParams.query === "string" ? JSON.parse(configParams.query) : configParams.query)
+    }
+
+    configParams.query = { ...configParams.query, dryRun, async: false };
+
     configParams.segment = configParams.segment || "none";
+
     configParams.filter_device = (configParams.filter_device ? (Array.isArray(configParams.filter_device) ? configParams.filter_device : configParams.filter_device.split(",")) : []);
+
     configParams.filter_view = (configParams.filter_view ? (Array.isArray(configParams.filter_view) ? configParams.filter_view : configParams.filter_view.split(",")) : []);
+
     configParams.filter_view = configParams.filter_view.slice(0, 10).filter(el => /[0-9]{1,3}/.test(el));
 
+    try {
+      if (dryRun) {
+        configParams.query.reports[0].dateRanges = [{ "range": "YESTERDAY" }];
+      }
 
-    if (dryRun) {
-      configParams.query.reports[0].dateRanges = [{ "range": "YESTERDAY" }];
-    }
+      if (dateRange.startDate) {
 
-    if (dateRange.startDate) {
-      var TZ = DEFAULT.TIMEZONE[configParams.apiDomain.split(".").pop()];
-      console.log("TZ detected:", TZ);
-
-      let from = getLocalEpoch(TZ, dateRange.startDate, 'from'),
-        to = getLocalEpoch(TZ, dateRange.endDate, 'to');
-
-      configParams.query.reports[0] = {
-        ...configParams.query.reports[0],
-        dateRanges: [{ from, to }],
-        dateRangeSplitPerScale: true,
-        dateScale: (configParams.dateScale == 'auto' ? getAutoTimeScale(to - from) : configParams.dateScale)
-      };
-    }
+        configParams.query.reports[0] = {
+          ...configParams.query.reports[0],
+          dateRanges: [{
+            "dateFrom": dateRange.startDate,
+            "dateTo": dateRange.endDate,
+            "dateFormat": "YYYY-MM-DD"
+          }],
+          dateRangeSplitPerScale: true,
+          dateScale: (configParams.dateScale == 'auto' ? getAutoTimeScale((new Date(dateRange.endDate) - new Date(dateRange.startDate)) / 1000) : configParams.dateScale)
+        };
+      }
+    } catch (e) { configParams.error = true; return configParams }
 
     if (!(fields.includes("reported"))) {
       delete configParams.query.reports[0].dateRangeSplitPerScale;
